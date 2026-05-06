@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # ── Models ──────────────────────────────────────────────────────────────────────
 
 SONNET_MODEL = "claude-sonnet-4-20250514"
-HAIKU_MODEL = "claude-haiku-3-5-20241022"
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
 # Token threshold: if the candidate payload is under this, use a single Sonnet
 # call (original behavior). Above this, switch to chunked Haiku sub-agents.
@@ -163,14 +163,22 @@ async def _request_json(system_prompt: str, user_prompt: str, error_label: str, 
             raise AppError(error_label, "Claude returned an empty response.", 502)
         return "".join(text_chunks).strip()
 
+    def _extract_json(text: str) -> Any:
+        # Strip markdown code fences if present
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = stripped.split("\n", 1)[-1]
+            if stripped.endswith("```"):
+                stripped = stripped.rsplit("```", 1)[0]
+        return json.loads(stripped.strip())
+
     raw = await do_request(user_prompt)
     try:
-        return json.loads(raw)
+        return _extract_json(raw)
     except json.JSONDecodeError:
-        retry_prompt = f"{user_prompt}\n\nIMPORTANT: return ONLY raw JSON, no markdown fences, no commentary."
-        retry_raw = await do_request(retry_prompt)
+        retry_raw = await do_request("Return ONLY raw JSON with no markdown fences or commentary.")
         try:
-            return json.loads(retry_raw)
+            return _extract_json(retry_raw)
         except json.JSONDecodeError as exc:
             raise AppError(error_label, "Claude returned malformed JSON twice.", 502) from exc
 
@@ -199,8 +207,22 @@ async def identify_candidate_files(
     if not filtered_tree:
         filtered_tree = file_tree
 
-    serialized_tree = "\n".join(f"- {item['path']} ({item['extension'] or 'no_ext'})" for item in filtered_tree)
-    
+    # For large repos the tree gets truncated — sort by keyword relevance first so
+    # the most relevant files survive the cut rather than being lost at the tail.
+    keywords = {
+        w.lower() for w in (feature_name + " " + feature_description + " " + natural_language_query).split()
+        if len(w) > 3
+    }
+
+    def _relevance(item: dict) -> int:
+        path_lower = item["path"].lower()
+        hits = sum(1 for kw in keywords if kw in path_lower)
+        depth = item["path"].count("/")
+        return hits * 10 - depth
+
+    sorted_tree = sorted(filtered_tree, key=_relevance, reverse=True)
+    serialized_tree = "\n".join(f"- {item['path']} ({item['extension'] or 'no_ext'})" for item in sorted_tree)
+
     max_chars = 52500  # ~15,000 tokens
     if len(serialized_tree) > max_chars:
         serialized_tree = serialized_tree[:max_chars] + "\n... [TRUNCATED - REPOSITORY TOO LARGE]"
@@ -217,7 +239,17 @@ async def identify_candidate_files(
     )
     if not isinstance(result, list):
         raise AppError("candidate_identification_failed", "Claude candidate identification response was not a JSON array.", 502)
-    return [str(item) for item in result[:15]]
+
+    logger.info("Claude returned %d candidate path(s): %s", len(result), result)
+
+    # Reject any paths Claude hallucinated that aren't in the actual inventory.
+    known_paths = {item["path"] for item in file_tree}
+    valid = [str(p) for p in result[:15] if str(p) in known_paths]
+    rejected = [str(p) for p in result[:15] if str(p) not in known_paths]
+    if rejected:
+        logger.warning("Rejected %d path(s) not in inventory: %s", len(rejected), rejected)
+    logger.info("%d valid candidate(s) after inventory check", len(valid))
+    return valid
 
 
 # ── Sub-Agent: Analyze a single file chunk ──────────────────────────────────────
@@ -255,9 +287,8 @@ async def _analyze_chunk(
             model=HAIKU_MODEL,
             max_tokens=4096,
         )
-    except AppError:
-        # If one chunk fails, return an empty result rather than crashing the whole trace
-        logger.warning(f"Sub-agent chunk {chunk_index + 1} failed, returning empty result")
+    except AppError as exc:
+        logger.warning(f"Sub-agent chunk {chunk_index + 1} API FAILED: {exc.detail}")
         return {
             "relevant_items": [],
             "entry_point_candidates": [],
@@ -267,6 +298,7 @@ async def _analyze_chunk(
         }
 
     if not isinstance(result, dict):
+        logger.warning(f"Sub-agent chunk {chunk_index + 1} returned unexpected type: {type(result)}")
         return {
             "relevant_items": [],
             "entry_point_candidates": [],
@@ -275,6 +307,9 @@ async def _analyze_chunk(
             "summary": f"Chunk {chunk_index + 1} returned unexpected format.",
         }
 
+    relevant_count = len(result.get("relevant_items") or [])
+    candidate_count = len(result.get("entry_point_candidates") or [])
+    logger.info(f"Sub-agent chunk {chunk_index + 1} result: {relevant_count} relevant items, {candidate_count} entry candidates — {result.get('summary', '')[:120]}")
     return result
 
 

@@ -1,0 +1,7 @@
+# Environments
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db

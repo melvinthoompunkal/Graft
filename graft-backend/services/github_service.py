@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shutil
+import sys
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -88,7 +89,10 @@ def build_clone_url(owner: str, repo: str, github_token: str | None) -> str:
 def clone_repo_sync(clone_url: str, target_dir: Path) -> None:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
-    Repo.clone_from(clone_url, str(target_dir), depth=1, multi_options=["--single-branch"], env=env)
+    extra: dict = {}
+    if sys.platform == "win32":
+        extra["c"] = "core.longpaths=true"
+    Repo.clone_from(clone_url, str(target_dir), depth=1, multi_options=["--single-branch"], env=env, allow_unsafe_options=sys.platform == "win32", **extra)
 
 
 def read_readme_in_order(repo_path: Path) -> str:

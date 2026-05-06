@@ -29,7 +29,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Graft Backend", version=APP_VERSION, lifespan=lifespan)
-frontend_dir = Path(__file__).resolve().parent.parent / "graft-frontend" / "dist"
+# In Docker: built frontend is copied to ./frontend-dist
+# In local dev: frontend is at ../graft-frontend/dist
+_app_root = Path(__file__).resolve().parent
+frontend_dir = _app_root / "frontend-dist"
+if not frontend_dir.exists():
+    frontend_dir = _app_root.parent / "graft-frontend" / "dist"
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,3 +87,7 @@ app.include_router(repo_router)
 
 if frontend_dir.exists():
     app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+else:
+    @app.get("/")
+    def root_health():
+        return {"status": "ok"}

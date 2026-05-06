@@ -1,0 +1,27 @@
+# Git
+.git/
+
+# Dependencies (will be installed fresh in Docker)
+**/node_modules
+**/venv
+**/.venv
+
+# Python cache
+**/__pycache__
+**/*.py[cod]
+
+# Build artifacts (will be built fresh in Docker)
+**/dist
+
+# Environment files (secrets set via Railway dashboard)
+**/.env
+**/.env.local
+
+# Demo project (not part of main deployment)
+graft-demo/
+
+# IDE / OS
+**/.vscode
+**/.idea
+**/.DS_Store
+**/Thumbs.db
